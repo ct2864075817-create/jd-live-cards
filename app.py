@@ -16,9 +16,12 @@ from io import BytesIO
 st.set_page_config(page_title="京东直播手卡生成器 Web版", page_icon="⚡", layout="wide")
 
 # --- 核心逻辑 ---
+# 升级了 User-Agent 池，伪装成更多种类的浏览器
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0"
 ]
 
 def get_headers():
@@ -26,7 +29,8 @@ def get_headers():
         "User-Agent": random.choice(USER_AGENTS),
         "Referer": "https://item.jd.com/",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9"
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Connection": "keep-alive" # 保持连接
     }
 
 def scrape_jd_sku(sku):
@@ -34,7 +38,14 @@ def scrape_jd_sku(sku):
     info = {"sku": sku, "title": "", "image_url": ""}
     
     try:
-        r = requests.get(url, headers=get_headers(), timeout=10)
+        # 增加超时时间，防止网络慢被误判
+        r = requests.get(url, headers=get_headers(), timeout=15)
+        
+        # 检查是否被重定向到了验证页面 (京东验证页通常包含 verify 或 passport)
+        if "verify" in r.url or "passport" in r.url:
+            print(f"SKU {sku} 触发了验证页面！")
+            return None
+
         r.encoding = r.apparent_encoding
         soup = BeautifulSoup(r.text, 'html.parser')
         
@@ -47,7 +58,8 @@ def scrape_jd_sku(sku):
         if raw_title:
             info["title"] = raw_title.replace("京东", "").replace("自营", "").strip()
         else:
-            info["title"] = f"商品_{sku}"
+            # 如果抓不到标题，可能是网页结构变了，也可能是被软拦截，返回None让外层处理
+            return None
 
         # 抓主图
         candidates = []
@@ -71,12 +83,13 @@ def scrape_jd_sku(sku):
         
         return info
     except Exception as e:
+        print(f"Error: {e}")
         return None
 
 def download_image(url, sku):
     if not url: return None
     try:
-        r = requests.get(url, headers=get_headers(), timeout=10)
+        r = requests.get(url, headers=get_headers(), timeout=15)
         filename = f"temp_img_{sku}.jpg"
         with open(filename, 'wb') as f: f.write(r.content)
         return filename
@@ -87,7 +100,6 @@ def call_ai(product_name, api_key, base_url):
     if not api_key: return {}
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     
-    # --- V3.0 核心升级：高转化痛点提示词 ---
     prompt = f"""
     你是一位拥有10年经验的电商金牌选品总监，擅长挖掘“痛点营销”和“高转化话术”。
     请根据商品名称【{product_name}】，深度剖析用户痛点，撰写 4 个极具煽动性和转化力的直播手卡卖点。
@@ -109,11 +121,11 @@ def call_ai(product_name, api_key, base_url):
     data = {
         "model": "deepseek-chat", 
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.8, # 稍微提高创造性
+        "temperature": 0.8, 
         "response_format": {"type": "json_object"}
     }
     try:
-        resp = requests.post(f"{base_url}/chat/completions", headers=headers, json=data, timeout=40) # 增加超时时间，因为生成内容变多了
+        resp = requests.post(f"{base_url}/chat/completions", headers=headers, json=data, timeout=40)
         return json.loads(resp.json()['choices'][0]['message']['content'])
     except:
         return {}
@@ -141,13 +153,8 @@ def generate_ppt(data, template_path, output_dir):
     
     points = data.get('points', {})
     for i in range(1, 5):
-        # 这里会将 "标题：详细内容" 组合在一起填入文本框
-        # 也可以根据需求只填内容，但现在的提示词生成的是一段完整的话
         content = points.get(f'selling_point_{i}', '')
-        
-        # 自动清洗一下可能的格式问题 (比如去掉了开头多余的 "1.")
         content = re.sub(r'^\d+\.?\s*', '', str(content))
-        
         replace(f"selling_point_{i}", content)
 
     if data['image_local']:
@@ -166,8 +173,9 @@ def generate_ppt(data, template_path, output_dir):
     return save_path
 
 # --- 网页界面 ---
-st.title("⚡ 京东直播手卡全自动生成器 (V3.0 高转化版)")
-st.markdown("升级说明：优化了AI算法，现在能生成更加详细、直击痛点的直播话术！")
+st.title("⚡ 京东直播手卡全自动生成器 (V3.1 防封号版)")
+st.markdown("不用安装软件，输入SKU直接下载PPT源文件！")
+st.caption("🛡️ 已启用智能防封模式：每生成一个商品会自动暂停几秒，请耐心等待。")
 
 # 侧边栏配置
 with st.sidebar:
@@ -215,6 +223,13 @@ if st.button("🚀 开始生成", type="primary"):
     generated_files = []
     
     for i, sku in enumerate(skus):
+        # --- 核心改动：增加防封延时 ---
+        if i > 0:
+            # 随机休息 3 到 8 秒，模拟人类操作
+            sleep_time = random.uniform(3, 8)
+            status_text.text(f"⏳ 正在模拟人工操作，暂停 {int(sleep_time)} 秒...")
+            time.sleep(sleep_time)
+        
         status_text.text(f"正在处理: {sku} ({i+1}/{len(skus)})...")
         
         if i < len(prices):
@@ -225,7 +240,7 @@ if st.button("🚀 开始生成", type="primary"):
         info = scrape_jd_sku(sku)
         
         if not info:
-            st.warning(f"SKU {sku} 抓取失败，请检查SKU是否正确或网络连接。")
+            st.warning(f"SKU {sku} 抓取被拦截或商品无效，已自动跳过。")
             continue
             
         info['price'] = current_price
@@ -261,4 +276,4 @@ if st.button("🚀 开始生成", type="primary"):
             mime="application/zip"
         )
     else:
-        st.error("没有生成任何文件，请检查 SKU 是否正确，或联系管理员查看后台日志。")
+        st.error("没有生成任何文件，可能是因为所有请求都被京东拦截了。请尝试切换手机热点再试。")
