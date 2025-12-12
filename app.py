@@ -24,13 +24,15 @@ USER_AGENTS = [
 def get_headers():
     return {
         "User-Agent": random.choice(USER_AGENTS),
-        "Referer": "[https://item.jd.com/](https://item.jd.com/)",
+        # 修复点 1: 移除了多余的 Markdown 格式，只保留纯 URL
+        "Referer": "https://item.jd.com/",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9"
     }
 
 def scrape_jd_sku(sku):
-    url = f"[https://item.jd.com/](https://item.jd.com/){sku}.html"
+    # 修复点 2: 修复了 URL 拼接格式
+    url = f"https://item.jd.com/{sku}.html"
     info = {"sku": sku, "title": "", "image_url": ""}
     
     try:
@@ -63,6 +65,7 @@ def scrape_jd_sku(sku):
             if img and "jfs" in img and ".jpg" in img:
                 if not img.startswith("http"):
                     img = "https:" + img if img.startswith("//") else "https://" + img
+                # 尽量获取高清图 (n0)
                 img = img.replace("/n1/", "/n0/").replace("/n5/", "/n0/")
                 valid_imgs.append(img)
 
@@ -71,6 +74,7 @@ def scrape_jd_sku(sku):
         
         return info
     except Exception as e:
+        # st.error(f"抓取错误: {e}") # 调试时可开启
         return None
 
 def download_image(url, sku):
@@ -98,7 +102,9 @@ def call_ai(product_name, api_key, base_url):
         "response_format": {"type": "json_object"}
     }
     try:
-        resp = requests.post(f"{base_url}/chat/completions", headers=headers, json=data, timeout=30)
+        # 确保 base_url 没有尾部的 /
+        clean_base_url = base_url.rstrip('/')
+        resp = requests.post(f"{clean_base_url}/chat/completions", headers=headers, json=data, timeout=30)
         return json.loads(resp.json()['choices'][0]['message']['content'])
     except:
         return {}
@@ -110,10 +116,12 @@ def generate_ppt(data, template_path, output_dir):
     slide = prs.slides[0]
 
     def replace(name, text):
+        # 遍历所有形状查找文本框
         for shape in slide.shapes:
             if shape.name == name and shape.has_text_frame:
                 shape.text_frame.text = str(text)
                 return
+            # 遍历组合形状内部
             if shape.shape_type == 6: 
                 for sub in shape.shapes:
                     if sub.name == name and sub.has_text_frame:
@@ -149,7 +157,8 @@ st.markdown("不用安装软件，输入SKU直接下载PPT源文件！")
 with st.sidebar:
     st.header("⚙️ 配置")
     api_key = st.text_input("AI API Key", type="password", help="输入DeepSeek Key")
-    base_url = st.text_input("Base URL", value="[https://api.deepseek.com](https://api.deepseek.com)")
+    # 修复点 3: 移除了 Base URL 输入框默认值中的 Markdown 格式
+    base_url = st.text_input("Base URL", value="https://api.deepseek.com")
     
     st.markdown("---")
     st.info("💡 请确保【直播手卡模板.pptx】已上传到服务器目录")
