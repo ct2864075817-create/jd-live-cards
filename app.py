@@ -24,13 +24,13 @@ USER_AGENTS = [
 def get_headers():
     return {
         "User-Agent": random.choice(USER_AGENTS),
-        "Referer": "https://item.jd.com/",
+        "Referer": "[https://item.jd.com/](https://item.jd.com/)",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9"
     }
 
 def scrape_jd_sku(sku):
-    url = f"https://item.jd.com/{sku}.html"
+    url = f"[https://item.jd.com/](https://item.jd.com/){sku}.html"
     info = {"sku": sku, "title": "", "image_url": ""}
     
     try:
@@ -149,7 +149,7 @@ st.markdown("不用安装软件，输入SKU直接下载PPT源文件！")
 with st.sidebar:
     st.header("⚙️ 配置")
     api_key = st.text_input("AI API Key", type="password", help="输入DeepSeek Key")
-    base_url = st.text_input("Base URL", value="https://api.deepseek.com")
+    base_url = st.text_input("Base URL", value="[https://api.deepseek.com](https://api.deepseek.com)")
     
     st.markdown("---")
     st.info("💡 请确保【直播手卡模板.pptx】已上传到服务器目录")
@@ -161,13 +161,13 @@ with st.sidebar:
             f.write(uploaded_template.getbuffer())
         st.success("模板已更新！")
 
-# 主界面
-col1, col2 = st.columns([2, 1])
+# 主界面：分为左右两列，左边填SKU，右边填价格
+col1, col2 = st.columns([1, 1])
 with col1:
-    skus_input = st.text_area("输入 SKU (支持批量，逗号或换行分隔)", height=150, placeholder="1000123456, 1000888888")
+    skus_input = st.text_area("1. 输入 SKU (批量，逗号或换行分隔)", height=200, placeholder="1000123456\n1000888888")
 with col2:
-    manual_price = st.text_input("直播专享价", value="9.9")
-    st.markdown("生成后将打包为一个 ZIP 文件下载。")
+    prices_input = st.text_area("2. 输入直播专享价 (对应左侧SKU顺序)", height=200, placeholder="9.9\n12.8\n(如果只填一个，则全部通用)")
+    st.caption("注：第一行价格对应第一行SKU，以此类推。如果价格输少了，剩下的商品会自动复用最后一个价格。")
 
 if st.button("🚀 开始生成", type="primary"):
     if not skus_input:
@@ -183,6 +183,11 @@ if st.button("🚀 开始生成", type="primary"):
     skus_text = skus_input.replace('，', ',').replace('\n', ',').replace(' ', ',')
     skus = [s.strip() for s in skus_text.split(',') if s.strip()]
     
+    # 解析价格
+    prices_text = prices_input.replace('，', ',').replace('\n', ',').replace(' ', ',')
+    prices = [p.strip() for p in prices_text.split(',') if p.strip()]
+    if not prices: prices = ["9.9"] # 兜底默认值
+    
     progress_bar = st.progress(0)
     status_text = st.empty()
     
@@ -191,13 +196,19 @@ if st.button("🚀 开始生成", type="primary"):
     for i, sku in enumerate(skus):
         status_text.text(f"正在处理: {sku} ({i+1}/{len(skus)})...")
         
+        # 获取对应价格：如果i在价格列表范围内，取对应值；否则取最后一个
+        if i < len(prices):
+            current_price = prices[i]
+        else:
+            current_price = prices[-1] 
+        
         # 1. 抓取
         info = scrape_jd_sku(sku)
         if not info:
             st.warning(f"SKU {sku} 抓取失败，跳过")
             continue
             
-        info['price'] = manual_price
+        info['price'] = current_price
         
         # 2. 图片
         info['image_local'] = download_image(info['image_url'], sku)
