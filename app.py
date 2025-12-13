@@ -10,6 +10,7 @@ import random
 import zipfile
 import time
 import os
+import copy  # 新增: 用于复制幻灯片对象
 
 # --- 页面配置 ---
 st.set_page_config(
@@ -188,66 +189,90 @@ def call_ai_generate_points(product_name, api_key, base_url):
         st.error(f"AI 请求异常: {e}")
         return {}
 
+def duplicate_slide(prs, source_slide_index=0):
+    """
+    克隆幻灯片的辅助函数
+    因为 python-pptx 没有直接复制 slide 的功能，需要通过 XML 操作实现
+    """
+    source = prs.slides[source_slide_index]
+    layout = source.slide_layout
+    dest = prs.slides.add_slide(layout)
+    
+    # 清空新幻灯片上的默认占位符（避免重叠）
+    for shp in list(dest.shapes):
+        dest.shapes._spTree.remove(shp._element)
+    
+    # 复制源幻灯片的所有形状
+    for shp in source.shapes:
+        new_el = copy.deepcopy(shp.element)
+        dest.shapes._spTree.append(new_el)
+    
+    return dest
+
 def process_ppt(template_file_obj, data_list):
-    """批量生成 PPT 并打包成 ZIP"""
-    zip_buffer = io.BytesIO()
+    """生成单个 PPT 文件，包含所有手卡"""
+    template_file_obj.seek(0)
+    prs = Presentation(template_file_obj)
     
-    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-        for data in data_list:
-            # 每次都需要重新加载模板（指针归零）
-            template_file_obj.seek(0)
-            prs = Presentation(template_file_obj)
-            slide = prs.slides[0]
-
-            # 文本替换函数
-            def replace_text(name, text):
-                for shape in slide.shapes:
-                    if shape.name == name and shape.has_text_frame:
-                        shape.text_frame.text = str(text)
-                        return
-                    if shape.shape_type == 6: # Group
-                        for sub in shape.shapes:
-                            if sub.name == name and sub.has_text_frame:
-                                sub.text_frame.text = str(text)
-                                return
-
-            # 执行替换
-            replace_text("product_name", data['title'])
-            replace_text("product_sku", data['sku'])
-            replace_text("price_live", data['price'])
+    # 1. 确保有足够的幻灯片
+    # 如果有多条数据，就基于第1页（索引0）进行克隆
+    if len(data_list) > 1:
+        for _ in range(len(data_list) - 1):
+            duplicate_slide(prs, 0)
             
-            points = data.get('points', {})
-            replace_text("selling_point_1", points.get('selling_point_1', ''))
-            replace_text("selling_point_2", points.get('selling_point_2', ''))
-            replace_text("selling_point_3", points.get('selling_point_3', ''))
-            replace_text("selling_point_4", points.get('selling_point_4', ''))
-
-            # 图片替换
-            if data['image_bytes']:
-                found_img = False
-                for shape in slide.shapes:
-                    if shape.name == "product_image":
-                        left, top, width, height = shape.left, shape.top, shape.width, shape.height
-                        # 移除旧图
-                        sp = shape._element
-                        sp.getparent().remove(sp)
-                        # 添加新图
-                        slide.shapes.add_picture(data['image_bytes'], left, top, width, height)
-                        found_img = True
-                        break
+    # 2. 遍历每一页幻灯片填充数据
+    for idx, data in enumerate(data_list):
+        if idx >= len(prs.slides): 
+            break
             
-            # 保存单个 PPT 到内存
-            ppt_buffer = io.BytesIO()
-            prs.save(ppt_buffer)
-            # 添加到 ZIP
-            zip_file.writestr(f"{data['sku']}.pptx", ppt_buffer.getvalue())
+        slide = prs.slides[idx]
+        
+        # 文本替换函数
+        def replace_text(name, text):
+            for shape in slide.shapes:
+                if shape.name == name and shape.has_text_frame:
+                    shape.text_frame.text = str(text)
+                    return
+                if shape.shape_type == 6: # Group
+                    for sub in shape.shapes:
+                        if sub.name == name and sub.has_text_frame:
+                            sub.text_frame.text = str(text)
+                            return
+
+        # 执行替换
+        replace_text("product_name", data['title'])
+        replace_text("product_sku", data['sku'])
+        replace_text("price_live", data['price'])
+        
+        points = data.get('points', {})
+        replace_text("selling_point_1", points.get('selling_point_1', ''))
+        replace_text("selling_point_2", points.get('selling_point_2', ''))
+        replace_text("selling_point_3", points.get('selling_point_3', ''))
+        replace_text("selling_point_4", points.get('selling_point_4', ''))
+
+        # 图片替换
+        if data['image_bytes']:
+            found_img = False
+            for shape in slide.shapes:
+                if shape.name == "product_image":
+                    left, top, width, height = shape.left, shape.top, shape.width, shape.height
+                    # 移除旧图
+                    sp = shape._element
+                    sp.getparent().remove(sp)
+                    # 添加新图
+                    slide.shapes.add_picture(data['image_bytes'], left, top, width, height)
+                    found_img = True
+                    break
     
-    return zip_buffer
+    # 保存结果到内存
+    ppt_buffer = io.BytesIO()
+    prs.save(ppt_buffer)
+    return ppt_buffer
 
 # --- UI 布局 ---
 
 st.title("⚡ 京东直播手卡全自动生成器 (Web版)")
-st.markdown("上传 PPT 模板，输入 SKU，自动抓取信息 + AI 生成痛点卖点，一键导出 PPT。")
+st.markdown("上传 PPT 模板，输入 SKU，自动抓取信息 + AI 生成痛点卖点，**一键生成单个PPT文件**。")
 
 with st.sidebar:
     st.header("🧠 1. AI 配置")
@@ -365,18 +390,18 @@ if st.button("🚀 开始生成", type="primary", use_container_width=True):
             
         status_text.text("正在生成 PPT 文件...")
         
-        # 3. 生成 PPT 压缩包
+        # 3. 生成 PPT 文件 (单文件)
         if processed_data:
             try:
-                zip_io = process_ppt(final_template_file, processed_data)
+                ppt_io = process_ppt(final_template_file, processed_data)
                 
-                st.success(f"🎉 成功生成 {len(processed_data)} 个手卡！")
+                st.success(f"🎉 成功生成 {len(processed_data)} 张手卡！")
                 
                 st.download_button(
-                    label="📥 下载所有手卡 (ZIP压缩包)",
-                    data=zip_io.getvalue(),
-                    file_name="Live_Cards_Output.zip",
-                    mime="application/zip",
+                    label="📥 下载 PPT (单文件 .pptx)",
+                    data=ppt_io.getvalue(),
+                    file_name="Live_Cards_Output.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                     type="primary"
                 )
             except Exception as e:
