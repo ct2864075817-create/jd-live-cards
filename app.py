@@ -10,7 +10,7 @@ import re
 import random
 import shutil
 import copy
-import ast  # 新增：用于处理单引号格式的数据
+import ast
 from io import BytesIO
 
 # --- 页面配置 ---
@@ -25,14 +25,14 @@ USER_AGENTS = [
 def get_headers():
     return {
         "User-Agent": random.choice(USER_AGENTS),
-        "Referer": "https://item.jd.com/",
+        "Referer": "[https://item.jd.com/](https://item.jd.com/)",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9",
         "Connection": "keep-alive"
     }
 
 def scrape_jd_sku(sku):
-    url = f"https://item.jd.com/{sku}.html"
+    url = f"[https://item.jd.com/](https://item.jd.com/){sku}.html"
     info = {"sku": sku, "title": "", "image_url": ""}
     
     try:
@@ -84,44 +84,58 @@ def download_image(url, sku):
     except:
         return None
 
+def extract_points_with_regex(text):
+    """
+    当JSON解析失败时，使用正则暴力提取卖点
+    """
+    points = {}
+    for i in range(1, 5):
+        key = f"selling_point_{i}"
+        # 匹配模式：key 后面跟着冒号，然后是引号，然后是内容
+        pattern = re.search(rf"['\"]?{key}['\"]?\s*:\s*['\"](.*?)['\"]", text, re.DOTALL)
+        if pattern:
+            points[key] = pattern.group(1)
+    return points
+
 def call_ai(product_name, api_key, base_url):
     if not api_key: return {}
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     
     prompt = f"""
-    你是一位拥有10年经验的电商金牌选品总监。请根据商品名称【{product_name}】，撰写 4 个高转化直播卖点。
-    【要求】：
-    1. 结构：【吸睛短标题】+【痛点场景/解决方案】。
-    2. 详细具体：拒绝空话，要有画面感。
-    3. 数量：必须 4 条。
+    你是一位拥有10年经验的电商金牌选品总监，擅长挖掘“痛点营销”和“高转化话术”。
+    请根据商品名称【{product_name}】，深度剖析用户痛点，撰写 4 个极具煽动性和转化力的直播手卡卖点。
+
+    【核心要求】：
+    1. **拒绝空话**：不要只说“好用”，要说出解决什么具体麻烦。
+    2. **结构严格**：采用“痛点场景 + 解决方案 + 带来的利益”的结构。
+    3. **详细具体**：每条卖点需包含一个【吸睛短标题】（6-10字）和一段【详细痛点阐述】（30-50字）。
+    4. **数量**：必须生成 4 条。
+
     【输出格式】：
-    必须返回纯 JSON 格式，不要加 ```json 等标记，键名为：selling_point_1, selling_point_2, selling_point_3, selling_point_4。
+    请直接返回纯 JSON 格式数据，键名固定为：selling_point_1, selling_point_2, selling_point_3, selling_point_4。
     """
     
     data = {
         "model": "deepseek-chat", 
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.8,
+        "temperature": 0.7,
         "response_format": {"type": "json_object"}
     }
     try:
         resp = requests.post(f"{base_url}/chat/completions", headers=headers, json=data, timeout=40)
         content = resp.json()['choices'][0]['message']['content']
         
-        # --- V4.1 核心修复：强力清洗数据 ---
-        # 1. 去掉 Markdown 代码块符号
+        # 清洗 Markdown
         content = content.replace("```json", "").replace("```", "").strip()
         
-        # 2. 尝试标准 JSON 解析
+        # 多重解析保障
         try:
             return json.loads(content)
-        except json.JSONDecodeError:
-            # 3. 如果失败（比如因为单引号），尝试用 Python 语法解析
+        except:
             try:
                 return ast.literal_eval(content)
             except:
-                # 4. 如果还是失败，返回空字典，防止报错
-                return {}
+                return extract_points_with_regex(content)
     except:
         return {}
 
@@ -138,14 +152,19 @@ def duplicate_slide(pres):
 
 def fill_slide(slide, data):
     def replace(name, text):
+        text_str = str(text)
+        # 防套娃清洗
+        if text_str.strip().startswith("{") and "selling_point" in text_str:
+             text_str = "AI生成格式错误，请手动修改"
+
         for shape in slide.shapes:
             if shape.name == name and shape.has_text_frame:
-                shape.text_frame.text = str(text)
+                shape.text_frame.text = text_str
                 return
-            if shape.shape_type == 6: # Group
+            if shape.shape_type == 6: 
                 for sub in shape.shapes:
                     if sub.name == name and sub.has_text_frame:
-                        sub.text_frame.text = str(text)
+                        sub.text_frame.text = text_str
                         return
 
     replace("product_name", data['title'])
@@ -153,10 +172,9 @@ def fill_slide(slide, data):
     replace("price_live", data['price'])
     
     points = data.get('points', {})
-    # 如果 points 是空的（解析失败），填入默认提示
     if not points:
         for i in range(1, 5):
-            replace(f"selling_point_{i}", "AI 生成超时或格式错误，请手动填写")
+            replace(f"selling_point_{i}", "智能卖点生成失败，请检查网络")
     else:
         for i in range(1, 5):
             content = points.get(f'selling_point_{i}', '')
@@ -173,8 +191,8 @@ def fill_slide(slide, data):
                 break
 
 # --- 网页界面 ---
-st.title("⚡ 京东直播手卡全自动生成器 (V4.1 修复乱码版)")
-st.markdown("升级说明：修复了卖点生成变成代码乱码的问题！")
+st.title("⚡ 京东直播手卡全自动生成器 (V4.2 终极稳定版)")
+st.markdown("升级说明：增强了对 AI 回复格式的兼容性，杜绝乱码！")
 
 # 侧边栏配置
 with st.sidebar:
@@ -197,7 +215,7 @@ with col1:
     skus_input = st.text_area("1. 输入 SKU (批量，逗号或换行分隔)", height=200, placeholder="1000123456\n1000888888")
 with col2:
     prices_input = st.text_area("2. 输入直播专享价 (对应左侧SKU顺序)", height=200, placeholder="9.9\n12.8\n(如果只填一个，则全部通用)")
-    st.caption("注：第一行价格对应第一行SKU，以此类推。")
+    st.caption("注：第一行价格对应第一行SKU，以此类推。如果价格输少了，剩下的商品会自动复用最后一个价格。")
 
 if st.button("🚀 开始生成合集", type="primary"):
     if not skus_input:
@@ -224,7 +242,7 @@ if st.button("🚀 开始生成合集", type="primary"):
     
     for i, sku in enumerate(skus):
         if i > 0:
-            sleep_time = random.uniform(2, 5)
+            sleep_time = random.uniform(3, 6)
             status_text.text(f"⏳ 防封暂停 {int(sleep_time)} 秒...")
             time.sleep(sleep_time)
             
