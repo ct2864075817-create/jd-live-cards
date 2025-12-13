@@ -9,6 +9,7 @@ import re
 import random
 import zipfile
 import time
+import os
 
 # --- 页面配置 ---
 st.set_page_config(
@@ -89,22 +90,32 @@ def download_image_to_memory(url):
         return None
 
 def call_ai_generate_points(product_name, api_key, base_url):
-    """调用 AI 生成卖点"""
+    """调用 AI 生成卖点 (升级版提示词)"""
     if not api_key:
         return {"selling_point_1": "请填写API Key", "selling_point_2": "以生成智能卖点"}
 
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    
+    # --- 修改 1: 优化提示词，专注于痛点和转化率 ---
     prompt = f"""
-    你是一名带货过亿的金牌主播。请根据商品名【{product_name}】，提炼 4 个适合口播的“高转化卖点”。
-    要求：
-    1. **口语化**：像跟粉丝聊天。
-    2. **格式**：需生成 4 条。
-       - 核心短句（5-8字）：醒目。
-       - 详细解释（20-40字）：简短有力。
-    输出格式：返回 JSON，key 为 selling_point_1 到 selling_point_4。
+    你是一名带货过亿的“金牌直播运营”。请针对商品【{product_name}】，挖掘用户的深层痛点，提炼 4 个“高转化率”的直播手卡卖点。
+
+    【撰写策略】：
+    1. **拒绝平庸**：不要只罗列参数（如“功率2000W”），要说给用户带来的改变（如“3秒速热，回家即刻温暖”）。
+    2. **痛点+爽点**：先戳用户痛点（没有这个产品时的麻烦），再给解决方案（这个产品怎么解决）。
+    3. **场景化**：让用户脑海中有画面感。
+
+    【格式要求】：
+    - 输出 4 条卖点。
+    - 每条包含：一个吸睛短句（6-10字） + 一句详细解释（痛点与解决方案，20-30字）。
+    - 语气：口语化、紧迫感、真诚推荐。
+
+    【输出JSON格式】：
+    返回 JSON 对象，Key 必须为 selling_point_1, selling_point_2, selling_point_3, selling_point_4。
     """
+    
     data = {
-        "model": "deepseek-chat", # 这里假设用户多数用 deepseek，也可以做成通过 input 获取
+        "model": "deepseek-chat", 
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.8,
         "response_format": {"type": "json_object"}
@@ -122,15 +133,15 @@ def call_ai_generate_points(product_name, api_key, base_url):
         st.error(f"AI 请求异常: {e}")
         return {}
 
-def process_ppt(template_file, data_list):
+def process_ppt(template_file_obj, data_list):
     """批量生成 PPT 并打包成 ZIP"""
     zip_buffer = io.BytesIO()
     
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         for data in data_list:
-            # 每次都需要重新加载模板（因为要修改它）
-            template_file.seek(0)
-            prs = Presentation(template_file)
+            # 每次都需要重新加载模板（指针归零）
+            template_file_obj.seek(0)
+            prs = Presentation(template_file_obj)
             slide = prs.slides[0]
 
             # 文本替换函数
@@ -181,7 +192,7 @@ def process_ppt(template_file, data_list):
 # --- UI 布局 ---
 
 st.title("⚡ 京东直播手卡全自动生成器 (Web版)")
-st.markdown("上传 PPT 模板，输入 SKU，自动抓取信息 + AI 生成卖点，一键导出 PPT。")
+st.markdown("上传 PPT 模板，输入 SKU，自动抓取信息 + AI 生成痛点卖点，一键导出 PPT。")
 
 with st.sidebar:
     st.header("🧠 1. AI 配置")
@@ -191,44 +202,95 @@ with st.sidebar:
     
     st.divider()
     st.header("📂 2. 模板设置")
-    uploaded_template = st.file_uploader("上传 .pptx 模板文件", type=["pptx"])
-    if not uploaded_template:
-        st.warning("请先上传模板文件！模板中需包含 product_name, product_sku, price_live, product_image 等命名元素。")
+    
+    # --- 修改 3: 模板加载逻辑 ---
+    uploaded_template = st.file_uploader("上传 .pptx 模板文件 (可选)", type=["pptx"])
+    
+    # 默认模板文件名
+    DEFAULT_TEMPLATE_NAME = "template.pptx"
+    
+    final_template_file = None
+    
+    if uploaded_template:
+        st.success(f"✅ 使用上传的模板: {uploaded_template.name}")
+        final_template_file = uploaded_template
+    elif os.path.exists(DEFAULT_TEMPLATE_NAME):
+        st.info(f"ℹ️ 未上传模板，将使用系统默认模板 ({DEFAULT_TEMPLATE_NAME})")
+        # 将本地文件读入内存，模拟 uploaded_file 的行为
+        with open(DEFAULT_TEMPLATE_NAME, "rb") as f:
+            final_template_file = io.BytesIO(f.read())
+    else:
+        st.warning(f"⚠️ 请上传模板！(且未在服务器找到默认模板 {DEFAULT_TEMPLATE_NAME})")
+
+    st.markdown("---")
+    st.caption("**模板制作说明**：PPT中需包含以下元素名称（Selection Pane）：\n`product_name`, `product_sku`, `price_live`, `product_image`, `selling_point_1`~`4`")
 
 st.header("📝 3. 商品与价格")
 col1, col2 = st.columns([3, 1])
+
 with col1:
-    sku_input = st.text_area("输入 SKU (支持逗号、空格或换行分隔)", height=150, placeholder="例如：1000123456, 1000888888")
+    # --- 修改 2: 批量输入逻辑说明 ---
+    st.markdown("**输入 SKU 和 价格** (格式：`SKU, 价格`，一行一个)")
+    sku_input = st.text_area(
+        "SKU列表", 
+        height=180, 
+        placeholder="例如：\n1000123456, 9.9\n1000888888, 19.9\n1000999999 (未填价格将使用右侧默认价)"
+    )
+
 with col2:
-    price_input = st.text_input("直播专享价", value="9.9")
-    st.caption("所有商品将使用此统一价格")
+    default_price = st.text_input("默认兜底价格", value="待定")
+    st.caption("如果左侧某一行只写了 SKU 没写价格，将自动使用此价格。")
 
 # --- 执行逻辑 ---
 
 if st.button("🚀 开始生成", type="primary", use_container_width=True):
-    if not uploaded_template:
-        st.error("❌ 请先在左侧上传 PPT 模板文件！")
+    if not final_template_file:
+        st.error("❌ 无法开始：没有可用的 PPT 模板（请上传或联系管理员添加默认模板）。")
     elif not sku_input.strip():
         st.error("❌ 请输入至少一个 SKU！")
     else:
-        # 1. 处理 SKU 列表
-        raw_skus = sku_input.replace('，', ',').replace('\n', ',').replace(' ', ',')
-        skus = [s.strip() for s in raw_skus.split(',') if s.strip()]
+        # 1. 解析 SKU 和 价格
+        lines = sku_input.strip().split('\n')
+        tasks = []
         
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            
+            # 兼容中文逗号
+            line = line.replace('，', ',')
+            
+            parts = line.split(',')
+            current_sku = parts[0].strip()
+            
+            # 如果有逗号分隔，取第二个作为价格；否则使用默认价格
+            current_price = parts[1].strip() if len(parts) > 1 else default_price
+            
+            if current_sku:
+                tasks.append({"sku": current_sku, "price": current_price})
+
+        if not tasks:
+            st.error("❌ 未识别到有效 SKU。")
+            st.stop()
+            
         processed_data = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         # 2. 循环处理
-        for idx, sku in enumerate(skus):
-            status_text.text(f"正在处理 ({idx+1}/{len(skus)}): SKU {sku} ...")
+        for idx, task in enumerate(tasks):
+            sku = task['sku']
+            price = task['price']
+            
+            status_text.text(f"正在处理 ({idx+1}/{len(tasks)}): SKU {sku} ...")
             
             # 抓取
             info = scrape_jd_sku(sku)
             if not info:
+                # 即使抓取失败也可以跳过，或者生成一个空的占位
                 continue
                 
-            info['price'] = price_input
+            info['price'] = price
             
             # AI 生成
             if api_key:
@@ -240,22 +302,25 @@ if st.button("🚀 开始生成", type="primary", use_container_width=True):
             info['image_bytes'] = download_image_to_memory(info['image_url'])
             
             processed_data.append(info)
-            progress_bar.progress((idx + 1) / len(skus))
+            progress_bar.progress((idx + 1) / len(tasks))
             
         status_text.text("正在生成 PPT 文件...")
         
         # 3. 生成 PPT 压缩包
         if processed_data:
-            zip_io = process_ppt(uploaded_template, processed_data)
-            
-            st.success(f"🎉 成功生成 {len(processed_data)} 个手卡！")
-            
-            st.download_button(
-                label="📥 下载所有手卡 (ZIP压缩包)",
-                data=zip_io.getvalue(),
-                file_name="Live_Cards_Output.zip",
-                mime="application/zip",
-                type="primary"
-            )
+            try:
+                zip_io = process_ppt(final_template_file, processed_data)
+                
+                st.success(f"🎉 成功生成 {len(processed_data)} 个手卡！")
+                
+                st.download_button(
+                    label="📥 下载所有手卡 (ZIP压缩包)",
+                    data=zip_io.getvalue(),
+                    file_name="Live_Cards_Output.zip",
+                    mime="application/zip",
+                    type="primary"
+                )
+            except Exception as e:
+                st.error(f"生成 PPT 时发生错误 (可能是模板格式问题): {e}")
         else:
             st.error("未能生成有效数据，请检查 SKU 是否正确。")
