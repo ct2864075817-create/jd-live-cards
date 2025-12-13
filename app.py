@@ -33,7 +33,7 @@ def get_headers():
     }
 
 def scrape_jd_sku(sku):
-    # 修正：去掉了多余的链接符号，直接使用纯文本网址
+    # 修正：直接使用纯文本网址
     url = f"[https://item.jd.com/](https://item.jd.com/){sku}.html"
     info = {"sku": sku, "title": "", "image_url": ""}
     
@@ -274,10 +274,6 @@ if st.button("🚀 开始生成 (ZIP打包)", type="primary"):
             file_name="直播手卡合集.zip",
             mime="application/zip"
         )
-        # 清理临时文件
-        shutil.rmtree(output_dir)
-    else:
-        st.error("生成失败，请检查SKU")
         # 清理临时文件
         shutil.rmtree(output_dir)
     else:
