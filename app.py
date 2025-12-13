@@ -10,6 +10,7 @@ import re
 import random
 import shutil
 import copy
+import ast  # 新增：用于处理单引号格式的数据
 from io import BytesIO
 
 # --- 页面配置 ---
@@ -36,7 +37,6 @@ def scrape_jd_sku(sku):
     
     try:
         r = requests.get(url, headers=get_headers(), timeout=15)
-        # 简单防验证判断
         if "verify" in r.url or "passport" in r.url:
             return None
 
@@ -80,7 +80,6 @@ def download_image(url, sku):
     if not url: return None
     try:
         r = requests.get(url, headers=get_headers(), timeout=15)
-        # 将图片保存在内存中，而不是写文件，提高速度
         return BytesIO(r.content)
     except:
         return None
@@ -96,7 +95,7 @@ def call_ai(product_name, api_key, base_url):
     2. 详细具体：拒绝空话，要有画面感。
     3. 数量：必须 4 条。
     【输出格式】：
-    返回纯 JSON，键名为：selling_point_1, selling_point_2, selling_point_3, selling_point_4。
+    必须返回纯 JSON 格式，不要加 ```json 等标记，键名为：selling_point_1, selling_point_2, selling_point_3, selling_point_4。
     """
     
     data = {
@@ -107,32 +106,37 @@ def call_ai(product_name, api_key, base_url):
     }
     try:
         resp = requests.post(f"{base_url}/chat/completions", headers=headers, json=data, timeout=40)
-        return json.loads(resp.json()['choices'][0]['message']['content'])
+        content = resp.json()['choices'][0]['message']['content']
+        
+        # --- V4.1 核心修复：强力清洗数据 ---
+        # 1. 去掉 Markdown 代码块符号
+        content = content.replace("```json", "").replace("```", "").strip()
+        
+        # 2. 尝试标准 JSON 解析
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            # 3. 如果失败（比如因为单引号），尝试用 Python 语法解析
+            try:
+                return ast.literal_eval(content)
+            except:
+                # 4. 如果还是失败，返回空字典，防止报错
+                return {}
     except:
         return {}
 
-# --- V4.0 核心功能：复制幻灯片 ---
 def duplicate_slide(pres):
-    """
-    在PPT末尾创建一个新页面，并完整复制第一页（模板页）的所有元素。
-    """
     source = pres.slides[0]
-    # 使用空白版式创建新页面
     blank_slide_layout = pres.slide_layouts[6] 
     dest = pres.slides.add_slide(blank_slide_layout)
 
-    # 复制源页面上的所有形状到新页面
     for shp in source.shapes:
         el = shp.element
         newel = copy.deepcopy(el)
         dest.shapes._spTree.insert_element_before(newel, 'p:extLst')
-    
     return dest
 
 def fill_slide(slide, data):
-    """
-    将数据填入指定的 slide 页面中
-    """
     def replace(name, text):
         for shape in slide.shapes:
             if shape.name == name and shape.has_text_frame:
@@ -149,10 +153,15 @@ def fill_slide(slide, data):
     replace("price_live", data['price'])
     
     points = data.get('points', {})
-    for i in range(1, 5):
-        content = points.get(f'selling_point_{i}', '')
-        content = re.sub(r'^\d+\.?\s*', '', str(content))
-        replace(f"selling_point_{i}", content)
+    # 如果 points 是空的（解析失败），填入默认提示
+    if not points:
+        for i in range(1, 5):
+            replace(f"selling_point_{i}", "AI 生成超时或格式错误，请手动填写")
+    else:
+        for i in range(1, 5):
+            content = points.get(f'selling_point_{i}', '')
+            content = re.sub(r'^\d+\.?\s*', '', str(content))
+            replace(f"selling_point_{i}", content)
 
     if data['image_data']:
         for shape in slide.shapes:
@@ -160,19 +169,18 @@ def fill_slide(slide, data):
                 left, top, width, height = shape.left, shape.top, shape.width, shape.height
                 sp = shape._element
                 sp.getparent().remove(sp)
-                # 直接从内存流读取图片
                 slide.shapes.add_picture(data['image_data'], left, top, width, height)
                 break
 
 # --- 网页界面 ---
-st.title("⚡ 京东直播手卡全自动生成器 (V4.0 合集版)")
-st.markdown("升级说明：所有商品将自动生成在**同一个PPT文件**中，无需解压！")
+st.title("⚡ 京东直播手卡全自动生成器 (V4.1 修复乱码版)")
+st.markdown("升级说明：修复了卖点生成变成代码乱码的问题！")
 
 # 侧边栏配置
 with st.sidebar:
     st.header("⚙️ 配置")
     api_key = st.text_input("AI API Key", type="password", help="输入DeepSeek Key")
-    base_url = st.text_input("Base URL", value="https://api.deepseek.com")
+    base_url = st.text_input("Base URL", value="[https://api.deepseek.com](https://api.deepseek.com)")
     
     st.markdown("---")
     st.info("💡 请确保【直播手卡模板.pptx】已上传到服务器目录")
@@ -200,10 +208,8 @@ if st.button("🚀 开始生成合集", type="primary"):
         st.error("找不到模板文件！请先在侧边栏上传模板。")
         st.stop()
     
-    # 1. 初始化 PPT 对象
     prs = Presentation("直播手卡模板.pptx")
     
-    # 清洗输入
     skus_text = skus_input.replace('，', ',').replace('\n', ',').replace(' ', ',')
     skus = [s.strip() for s in skus_text.split(',') if s.strip()]
     
@@ -217,7 +223,6 @@ if st.button("🚀 开始生成合集", type="primary"):
     success_count = 0
     
     for i, sku in enumerate(skus):
-        # 延时防封
         if i > 0:
             sleep_time = random.uniform(2, 5)
             status_text.text(f"⏳ 防封暂停 {int(sleep_time)} 秒...")
@@ -225,10 +230,8 @@ if st.button("🚀 开始生成合集", type="primary"):
             
         status_text.text(f"正在处理第 {i+1}/{len(skus)} 个商品: {sku} ...")
         
-        # 确定价格
         current_price = prices[i] if i < len(prices) else prices[-1]
         
-        # 抓取信息
         info = scrape_jd_sku(sku)
         if not info:
             st.warning(f"SKU {sku} 抓取失败，已跳过。")
@@ -237,21 +240,16 @@ if st.button("🚀 开始生成合集", type="primary"):
         info['price'] = current_price
         info['image_data'] = download_image(info['image_url'], sku)
         
-        # AI 生成
         if api_key:
             info['points'] = call_ai(info['title'], api_key, base_url)
         else:
             info['points'] = {}
             
-        # --- 核心：PPT 页面处理 ---
         if i == 0:
-            # 第一个商品，直接用模板的第一页
             current_slide = prs.slides[0]
         else:
-            # 后面的商品，复制第一页（模板页）创建新页
             current_slide = duplicate_slide(prs)
             
-        # 填入数据
         fill_slide(current_slide, info)
         success_count += 1
         
@@ -259,7 +257,6 @@ if st.button("🚀 开始生成合集", type="primary"):
     
     status_text.text("正在保存文件...")
     
-    # 保存结果到内存
     output_ppt = BytesIO()
     prs.save(output_ppt)
     output_ppt.seek(0)
