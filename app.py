@@ -34,7 +34,7 @@ def get_headers():
     }
 
 def scrape_jd_sku(sku):
-    """抓取京东商品标题和主图"""
+    """抓取京东商品标题和主图 (多源策略，防止标题被截断)"""
     url = f"https://item.jd.com/{sku}.html"
     info = {"sku": sku, "title": "", "image_url": ""}
     
@@ -43,31 +43,66 @@ def scrape_jd_sku(sku):
         r.encoding = r.apparent_encoding
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # 1. 抓标题
-        raw_title = ""
-        title_tag = soup.select_one("div.sku-name")
-        if title_tag: raw_title = title_tag.get_text(strip=True)
-        if not raw_title and soup.title: raw_title = soup.title.string.split('-')[0].strip()
-        
-        if raw_title:
-            # 清理标题中的换行和多余空格，防止干扰 Prompt
-            clean_title = raw_title.replace("京东", "").replace("自营", "").replace("\n", " ").strip()
-            info["title"] = clean_title
-        else:
-            info["title"] = f"商品_{sku}" # 如果这里由于反爬没抓到标题，AI就会生成垃圾内容
-
-        # 2. 抓主图
+        # --- 1. 抓标题 (多源择优策略) ---
         candidates = []
+        
+        # (A) 页面显示的标题 (可能含省略号)
+        title_tag = soup.select_one("div.sku-name")
+        if title_tag: 
+            candidates.append(title_tag.get_text(strip=True))
+
+        # (B) 主图 Alt 属性 (通常完整且无干扰)
+        spec_img = soup.select_one("#spec-img")
+        if spec_img and spec_img.get('alt'):
+            candidates.append(spec_img.get('alt').strip())
+            
+        # (C) 网页 Title (SEO标题，通常最完整)
+        if soup.title:
+            t = soup.title.get_text().strip()
+            # 移除京东SEO后缀，如 " - 京东" 或 "【行情 ...】"
+            t = t.split('-')[0].strip() 
+            t = t.split('【')[0].strip() 
+            candidates.append(t)
+            
+        # (D) Meta 描述
+        meta_kw = soup.find("meta", attrs={"name": "keywords"})
+        if meta_kw and meta_kw.get("content"):
+            # keywords 通常是逗号分隔，第一个通常是全名
+            candidates.append(meta_kw.get("content").split(',')[0].strip())
+
+        # 筛选与择优
+        final_title = ""
+        valid_candidates = []
+        
+        for c in candidates:
+            # 基础清理
+            c = c.replace("京东", "").replace("自营", "").replace("\n", " ").strip()
+            if not c: continue
+            valid_candidates.append(c)
+            
+        if valid_candidates:
+            # 排序规则：优先选【没有省略号】的，其次选【长度最长】的
+            # (not has_ellipsis) -> True(1) > False(0)
+            valid_candidates.sort(key=lambda x: (not ("..." in x or "…" in x), len(x)), reverse=True)
+            final_title = valid_candidates[0]
+            
+        if final_title:
+            info["title"] = final_title
+        else:
+            info["title"] = f"商品_{sku}" # 兜底，防止AI乱编
+
+        # --- 2. 抓主图 ---
+        candidates_img = []
         img_tag = soup.select_one("#spec-img")
         if img_tag:
-            candidates.append(img_tag.get('data-origin'))
-            candidates.append(img_tag.get('src'))
+            candidates_img.append(img_tag.get('data-origin'))
+            candidates_img.append(img_tag.get('src'))
         
         # 正则补充匹配
         patterns = re.findall(r'//img\d{1,2}\.360buyimg\.com/n[01]/jfs/[^"]+\.jpg', r.text)
-        candidates.extend(patterns)
+        candidates_img.extend(patterns)
 
-        for img in candidates:
+        for img in candidates_img:
             if img and "jfs" in img and ".jpg" in img:
                 if not img.startswith("http"):
                     img = "https:" + img if img.startswith("//") else "https://" + img
@@ -94,7 +129,7 @@ def download_image_to_memory(url):
         return None
 
 def call_ai_generate_points(product_name, api_key, base_url):
-    """调用 AI 生成卖点 (User/System 分离版 + 强制字数约束)"""
+    """调用 AI 生成卖点 (User/System 分离版 + 60-80字强制约束)"""
     if not api_key:
         return {"selling_point_1": "请填写API Key", "selling_point_2": "以生成智能卖点"}
 
@@ -109,14 +144,12 @@ def call_ai_generate_points(product_name, api_key, base_url):
 
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     
-    # --- 核心修改：将提示词拆分为 System（规则）和 User（内容） ---
-    
-    # System Prompt: 永远不变的法则，强制 AI 每次都遵守
+    # --- System Prompt: 设定人设和死命令 ---
     system_prompt = """
     你是一名带货过亿的金牌直播运营。你的唯一任务是为商品撰写极具煽动性的【直播手卡文案】。
     
     【必须遵守的死命令】：
-    1. **严格字数控制**：每一条卖点的总字数（含标点）**必须控制在 60-80 字之间**！字数太少会显得空洞，太多会排版溢出。请确保内容充实。
+    1. **严格字数控制**：每一条卖点的总字数（含标点）**必须控制在 60-80 字之间**！字数太少会显得空洞，太多会排版溢出。请确保内容充实且完整。
     2. **拒绝通用**：禁止使用“性价比高”、“非常好用”等万金油词汇，必须结合商品名称中的具体参数（如材质、功率、成分）来发挥。
     3. **结构要求**：先写痛点（没有它多麻烦），再写爽点（有了它多舒服）。
     4. **语气要求**：口语化、紧迫感、像是朋友按头安利。
@@ -125,7 +158,7 @@ def call_ai_generate_points(product_name, api_key, base_url):
     必须返回标准 JSON 对象，Key 必须严格为 selling_point_1, selling_point_2, selling_point_3, selling_point_4。
     """
 
-    # User Prompt: 每次变化的商品
+    # --- User Prompt: 仅包含商品名称 ---
     user_prompt = f"""
     需生成的商品名称：【{product_name}】
     
@@ -138,10 +171,9 @@ def call_ai_generate_points(product_name, api_key, base_url):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.85, # 稍微提高一点随机性，避免内容重复
+        "temperature": 0.85, # 提高随机性
         "response_format": {"type": "json_object"},
-        # 添加随机种子，防止 API 缓存导致的重复或偷懒
-        "seed": random.randint(1, 10000) 
+        "seed": random.randint(1, 10000) # 防止缓存
     }
 
     try:
@@ -252,7 +284,7 @@ st.header("📝 3. 商品与价格")
 col1, col2 = st.columns([3, 1])
 
 with col1:
-    # --- 批量输入逻辑说明 ---
+    # --- 批量输入逻辑 ---
     st.markdown("**输入 SKU 和 价格** (格式：`SKU, 价格`，一行一个)")
     sku_input = st.text_area(
         "SKU列表", 
@@ -315,7 +347,6 @@ if st.button("🚀 开始生成", type="primary", use_container_width=True):
             # 抓取
             info = scrape_jd_sku(sku)
             if not info:
-                # 即使抓取失败也可以跳过，或者生成一个空的占位
                 continue
                 
             info['price'] = price
