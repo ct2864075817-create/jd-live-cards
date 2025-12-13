@@ -1,50 +1,48 @@
 import streamlit as st
-import pandas as pd
-from pptx import Presentation
-import os
-import time
 import requests
 from bs4 import BeautifulSoup
+from pptx import Presentation
+from pptx.util import Inches, Pt
+import io
 import json
 import re
 import random
-import shutil
-import copy
-import ast
 import zipfile
-from io import BytesIO
+import time
 
 # --- 页面配置 ---
-st.set_page_config(page_title="京东直播手卡生成器 (V3.0 ZIP版)", page_icon="⚡", layout="wide")
+st.set_page_config(
+    page_title="京东直播手卡生成器 Web版",
+    page_icon="⚡",
+    layout="wide"
+)
 
-# --- 核心逻辑 ---
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-]
+# --- 工具函数 ---
 
+# 伪装浏览器头
 def get_headers():
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ]
     return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Referer": "[https://item.jd.com/](https://item.jd.com/)",
+        "User-Agent": random.choice(user_agents),
+        "Referer": "https://item.jd.com/",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Connection": "keep-alive"
+        "Accept-Language": "zh-CN,zh;q=0.9"
     }
 
 def scrape_jd_sku(sku):
-    # 修正：直接使用纯文本网址
-    url = f"[https://item.jd.com/](https://item.jd.com/){sku}.html"
+    """抓取京东商品标题和主图"""
+    url = f"https://item.jd.com/{sku}.html"
     info = {"sku": sku, "title": "", "image_url": ""}
     
     try:
-        r = requests.get(url, headers=get_headers(), timeout=15)
-        if "verify" in r.url or "passport" in r.url:
-            return None
-
+        r = requests.get(url, headers=get_headers(), timeout=10)
         r.encoding = r.apparent_encoding
         soup = BeautifulSoup(r.text, 'html.parser')
         
+        # 1. 抓标题
         raw_title = ""
         title_tag = soup.select_one("div.sku-name")
         if title_tag: raw_title = title_tag.get_text(strip=True)
@@ -53,229 +51,211 @@ def scrape_jd_sku(sku):
         if raw_title:
             info["title"] = raw_title.replace("京东", "").replace("自营", "").strip()
         else:
-            return None
+            info["title"] = f"商品_{sku}"
 
+        # 2. 抓主图
         candidates = []
         img_tag = soup.select_one("#spec-img")
         if img_tag:
             candidates.append(img_tag.get('data-origin'))
             candidates.append(img_tag.get('src'))
+        
+        # 正则补充匹配
         patterns = re.findall(r'//img\d{1,2}\.360buyimg\.com/n[01]/jfs/[^"]+\.jpg', r.text)
         candidates.extend(patterns)
 
-        valid_imgs = []
         for img in candidates:
             if img and "jfs" in img and ".jpg" in img:
                 if not img.startswith("http"):
                     img = "https:" + img if img.startswith("//") else "https://" + img
+                # 替换为高清大图
                 img = img.replace("/n1/", "/n0/").replace("/n5/", "/n0/")
-                valid_imgs.append(img)
-
-        if valid_imgs:
-            info["image_url"] = valid_imgs[0]
-        
+                info["image_url"] = img
+                break
+                
         return info
     except Exception as e:
+        st.error(f"SKU {sku} 抓取失败: {e}")
         return None
 
-def download_image(url, sku):
+def download_image_to_memory(url):
+    """下载图片到内存字节流"""
     if not url: return None
     try:
-        r = requests.get(url, headers=get_headers(), timeout=15)
-        return BytesIO(r.content)
-    except:
+        r = requests.get(url, headers=get_headers(), timeout=10, verify=False)
+        return io.BytesIO(r.content)
+    except Exception as e:
+        st.error(f"图片下载失败: {e}")
         return None
 
-def extract_points_with_regex(text):
-    points = {}
-    for i in range(1, 5):
-        key = f"selling_point_{i}"
-        pattern = re.search(rf"['\"]?{key}['\"]?\s*:\s*['\"](.*?)['\"]", text, re.DOTALL)
-        if pattern:
-            points[key] = pattern.group(1)
-    return points
+def call_ai_generate_points(product_name, api_key, base_url):
+    """调用 AI 生成卖点"""
+    if not api_key:
+        return {"selling_point_1": "请填写API Key", "selling_point_2": "以生成智能卖点"}
 
-def call_ai(product_name, api_key, base_url):
-    if not api_key: return {}
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-    
     prompt = f"""
-    你是一位拥有10年经验的电商金牌选品总监，擅长挖掘“痛点营销”和“高转化话术”。
-    请根据商品名称【{product_name}】，深度剖析用户痛点，撰写 4 个极具煽动性和转化力的直播手卡卖点。
-
-    【核心要求】：
-    1. **拒绝空话**：不要只说“好用”、“便宜”，要说出具体好在哪里，解决什么具体麻烦。
-    2. **结构严格**：采用“痛点场景 + 解决方案 + 带来的利益”的结构。
-    3. **详细具体**：每条卖点需包含一个【吸睛短标题】（6-10字）和一段【详细痛点阐述】（30-50字）。
-    4. **数量**：必须生成 4 条。
-
-    【参考范例（以保温杯为例）】：
-    - 卖点1：**拒绝喝冷水，24小时锁温**：上班忙起来总忘喝水，想喝时水早凉了伤胃？它采用双层抽真空技术，早上倒的热水，晚上还是烫嘴的，随时温暖你的胃。
-    - 卖点2：**不漏水才是硬道理**：包里文件电脑最怕水杯漏水！这款采用食品级硅胶密封圈，倒置狂甩都不漏，放心随便塞进包里，出行更安心。
-
-    【输出格式】：
-    请直接返回纯 JSON 格式数据，键名固定为：selling_point_1, selling_point_2, selling_point_3, selling_point_4。
+    你是一名带货过亿的金牌主播。请根据商品名【{product_name}】，提炼 4 个适合口播的“高转化卖点”。
+    要求：
+    1. **口语化**：像跟粉丝聊天。
+    2. **格式**：需生成 4 条。
+       - 核心短句（5-8字）：醒目。
+       - 详细解释（20-40字）：简短有力。
+    输出格式：返回 JSON，key 为 selling_point_1 到 selling_point_4。
     """
-    
     data = {
-        "model": "deepseek-chat", 
+        "model": "deepseek-chat", # 这里假设用户多数用 deepseek，也可以做成通过 input 获取
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.8,
         "response_format": {"type": "json_object"}
     }
+
     try:
-        # 修正：确保 Base URL 也是纯净的
-        clean_base_url = base_url.strip().rstrip('/')
-        if not clean_base_url.startswith('http'): 
-            clean_base_url = "[https://api.deepseek.com](https://api.deepseek.com)"
-        
-        resp = requests.post(f"{clean_base_url}/chat/completions", headers=headers, json=data, timeout=40)
-        content = resp.json()['choices'][0]['message']['content']
-        content = content.replace("```json", "").replace("```", "").strip()
-        
-        try:
-            return json.loads(content)
-        except:
-            try:
-                return ast.literal_eval(content)
-            except:
-                return extract_points_with_regex(content)
-    except:
+        resp = requests.post(f"{base_url}/chat/completions", headers=headers, json=data, timeout=30)
+        result = resp.json()
+        if 'error' in result:
+            st.error(f"AI 接口报错: {result['error']['message']}")
+            return {}
+        content = result['choices'][0]['message']['content']
+        return json.loads(content)
+    except Exception as e:
+        st.error(f"AI 请求异常: {e}")
         return {}
 
-def generate_ppt(data, template_path, output_dir):
-    if not os.path.exists(template_path): return None
-    sku = data['sku']
-    prs = Presentation(template_path)
-    slide = prs.slides[0]
+def process_ppt(template_file, data_list):
+    """批量生成 PPT 并打包成 ZIP"""
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+        for data in data_list:
+            # 每次都需要重新加载模板（因为要修改它）
+            template_file.seek(0)
+            prs = Presentation(template_file)
+            slide = prs.slides[0]
 
-    def replace(name, text):
-        text_str = str(text)
-        if text_str.strip().startswith("{") and "selling_point" in text_str:
-             text_str = "AI生成格式错误，请手动修改"
-        for shape in slide.shapes:
-            if shape.name == name and shape.has_text_frame:
-                shape.text_frame.text = text_str
-                return
-            if shape.shape_type == 6: 
-                for sub in shape.shapes:
-                    if sub.name == name and sub.has_text_frame:
-                        sub.text_frame.text = text_str
+            # 文本替换函数
+            def replace_text(name, text):
+                for shape in slide.shapes:
+                    if shape.name == name and shape.has_text_frame:
+                        shape.text_frame.text = str(text)
                         return
+                    if shape.shape_type == 6: # Group
+                        for sub in shape.shapes:
+                            if sub.name == name and sub.has_text_frame:
+                                sub.text_frame.text = str(text)
+                                return
 
-    replace("product_name", data['title'])
-    replace("product_sku", data['sku']) 
-    replace("price_live", data['price'])
+            # 执行替换
+            replace_text("product_name", data['title'])
+            replace_text("product_sku", data['sku'])
+            replace_text("price_live", data['price'])
+            
+            points = data.get('points', {})
+            replace_text("selling_point_1", points.get('selling_point_1', ''))
+            replace_text("selling_point_2", points.get('selling_point_2', ''))
+            replace_text("selling_point_3", points.get('selling_point_3', ''))
+            replace_text("selling_point_4", points.get('selling_point_4', ''))
+
+            # 图片替换
+            if data['image_bytes']:
+                found_img = False
+                for shape in slide.shapes:
+                    if shape.name == "product_image":
+                        left, top, width, height = shape.left, shape.top, shape.width, shape.height
+                        # 移除旧图
+                        sp = shape._element
+                        sp.getparent().remove(sp)
+                        # 添加新图
+                        slide.shapes.add_picture(data['image_bytes'], left, top, width, height)
+                        found_img = True
+                        break
+            
+            # 保存单个 PPT 到内存
+            ppt_buffer = io.BytesIO()
+            prs.save(ppt_buffer)
+            # 添加到 ZIP
+            zip_file.writestr(f"{data['sku']}.pptx", ppt_buffer.getvalue())
     
-    points = data.get('points', {})
-    if not points:
-        for i in range(1, 5):
-            replace(f"selling_point_{i}", "智能卖点生成失败")
-    else:
-        for i in range(1, 5):
-            content = points.get(f'selling_point_{i}', '')
-            content = re.sub(r'^\d+\.?\s*', '', str(content))
-            replace(f"selling_point_{i}", content)
+    return zip_buffer
 
-    if data['image_data']:
-        for shape in slide.shapes:
-            if shape.name == "product_image":
-                left, top, width, height = shape.left, shape.top, shape.width, shape.height
-                sp = shape._element
-                sp.getparent().remove(sp)
-                slide.shapes.add_picture(data['image_data'], left, top, width, height)
-                break
-    
-    # 保存为单独的PPT文件
-    save_path = os.path.join(output_dir, f"{sku}.pptx")
-    prs.save(save_path)
-    return save_path
+# --- UI 布局 ---
 
-# --- 网页界面 ---
-st.title("⚡ 京东直播手卡生成器 (V3.0 ZIP版)")
+st.title("⚡ 京东直播手卡全自动生成器 (Web版)")
+st.markdown("上传 PPT 模板，输入 SKU，自动抓取信息 + AI 生成卖点，一键导出 PPT。")
+
 with st.sidebar:
-    st.header("⚙️ 配置")
-    api_key = st.text_input("AI API Key", type="password", help="输入DeepSeek Key")
-    # 修正：默认值去掉了 Markdown 格式
-    base_url = st.text_input("Base URL", value="[https://api.deepseek.com](https://api.deepseek.com)")
-    uploaded_template = st.file_uploader("或上传你的PPT模板", type="pptx")
-    if uploaded_template:
-        with open("直播手卡模板.pptx", "wb") as f:
-            f.write(uploaded_template.getbuffer())
-        st.success("模板已更新！")
+    st.header("🧠 1. AI 配置")
+    api_key = st.text_input("API Key", type="password", help="推荐使用 DeepSeek API")
+    base_url = st.text_input("Base URL", value="https://api.deepseek.com")
+    st.info("如果没有 Key，卖点部分将为空，但基础信息仍会生成。")
+    
+    st.divider()
+    st.header("📂 2. 模板设置")
+    uploaded_template = st.file_uploader("上传 .pptx 模板文件", type=["pptx"])
+    if not uploaded_template:
+        st.warning("请先上传模板文件！模板中需包含 product_name, product_sku, price_live, product_image 等命名元素。")
 
-col1, col2 = st.columns([1, 1])
+st.header("📝 3. 商品与价格")
+col1, col2 = st.columns([3, 1])
 with col1:
-    skus_input = st.text_area("1. 输入 SKU (批量)", height=200, placeholder="1000123456\n1000888888")
+    sku_input = st.text_area("输入 SKU (支持逗号、空格或换行分隔)", height=150, placeholder="例如：1000123456, 1000888888")
 with col2:
-    prices_input = st.text_area("2. 输入直播专享价", height=200, placeholder="9.9\n12.8")
+    price_input = st.text_input("直播专享价", value="9.9")
+    st.caption("所有商品将使用此统一价格")
 
-if st.button("🚀 开始生成 (ZIP打包)", type="primary"):
-    if not skus_input:
-        st.error("请输入 SKU")
-        st.stop()
-    if not os.path.exists("直播手卡模板.pptx"):
-        st.error("找不到模板文件！")
-        st.stop()
-    
-    # 准备临时目录
-    output_dir = "temp_output_cards"
-    if os.path.exists(output_dir): shutil.rmtree(output_dir)
-    os.makedirs(output_dir)
-    
-    skus_text = skus_input.replace('，', ',').replace('\n', ',').replace(' ', ',')
-    skus = [s.strip() for s in skus_text.split(',') if s.strip()]
-    prices_text = prices_input.replace('，', ',').replace('\n', ',').replace(' ', ',')
-    prices = [p.strip() for p in prices_text.split(',') if p.strip()]
-    if not prices: prices = ["9.9"]
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    generated_files = []
-    
-    for i, sku in enumerate(skus):
-        if i > 0:
-            sleep_time = random.uniform(2, 5)
-            status_text.text(f"⏳ 防封暂停 {int(sleep_time)} 秒...")
-            time.sleep(sleep_time)
-        status_text.text(f"处理中: {sku}...")
-        
-        current_price = prices[i] if i < len(prices) else prices[-1]
-        info = scrape_jd_sku(sku)
-        if not info:
-            st.warning(f"SKU {sku} 抓取失败")
-            continue
-            
-        info['price'] = current_price
-        info['image_data'] = download_image(info['image_url'], sku)
-        if api_key:
-            info['points'] = call_ai(info['title'], api_key, base_url)
-        else:
-            info['points'] = {}
-            
-        # V3.0 逻辑：生成独立文件
-        ppt_path = generate_ppt(info, "直播手卡模板.pptx", output_dir)
-        if ppt_path:
-            generated_files.append(ppt_path)
-        
-        progress_bar.progress((i + 1) / len(skus))
-    
-    # 打包 ZIP
-    if generated_files:
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w") as zf:
-            for file_path in generated_files:
-                zf.write(file_path, os.path.basename(file_path))
-        
-        st.success(f"🎉 成功生成 {len(generated_files)} 个文件！")
-        st.download_button(
-            label="⬇️ 下载 ZIP 压缩包",
-            data=zip_buffer.getvalue(),
-            file_name="直播手卡合集.zip",
-            mime="application/zip"
-        )
-        # 清理临时文件
-        shutil.rmtree(output_dir)
+# --- 执行逻辑 ---
+
+if st.button("🚀 开始生成", type="primary", use_container_width=True):
+    if not uploaded_template:
+        st.error("❌ 请先在左侧上传 PPT 模板文件！")
+    elif not sku_input.strip():
+        st.error("❌ 请输入至少一个 SKU！")
     else:
-        st.error("生成失败，请检查SKU")
-
+        # 1. 处理 SKU 列表
+        raw_skus = sku_input.replace('，', ',').replace('\n', ',').replace(' ', ',')
+        skus = [s.strip() for s in raw_skus.split(',') if s.strip()]
+        
+        processed_data = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # 2. 循环处理
+        for idx, sku in enumerate(skus):
+            status_text.text(f"正在处理 ({idx+1}/{len(skus)}): SKU {sku} ...")
+            
+            # 抓取
+            info = scrape_jd_sku(sku)
+            if not info:
+                continue
+                
+            info['price'] = price_input
+            
+            # AI 生成
+            if api_key:
+                info['points'] = call_ai_generate_points(info['title'], api_key, base_url)
+            else:
+                info['points'] = {}
+            
+            # 下载图片
+            info['image_bytes'] = download_image_to_memory(info['image_url'])
+            
+            processed_data.append(info)
+            progress_bar.progress((idx + 1) / len(skus))
+            
+        status_text.text("正在生成 PPT 文件...")
+        
+        # 3. 生成 PPT 压缩包
+        if processed_data:
+            zip_io = process_ppt(uploaded_template, processed_data)
+            
+            st.success(f"🎉 成功生成 {len(processed_data)} 个手卡！")
+            
+            st.download_button(
+                label="📥 下载所有手卡 (ZIP压缩包)",
+                data=zip_io.getvalue(),
+                file_name="Live_Cards_Output.zip",
+                mime="application/zip",
+                type="primary"
+            )
+        else:
+            st.error("未能生成有效数据，请检查 SKU 是否正确。")
