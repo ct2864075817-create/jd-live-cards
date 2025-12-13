@@ -32,7 +32,7 @@ def get_headers():
     }
 
 def scrape_jd_sku(sku):
-    # 修正：直接使用纯文本网址，去掉了多余符号
+    # 修正：直接使用纯文本网址，确保没有 Markdown 符号
     url = f"[https://item.jd.com/](https://item.jd.com/){sku}.html"
     info = {"sku": sku, "title": "", "image_url": ""}
     
@@ -249,4 +249,3 @@ if st.button("🚀 开始生成合集", type="primary"):
         st.download_button(label="⬇️ 下载PPT", data=output_ppt, file_name="直播手卡.pptx", mime="application/vnd.openxmlformats-officedocument.presentationml.presentation")
     else:
         st.error("生成失败，请检查SKU")
-
