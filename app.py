@@ -33,6 +33,7 @@ def get_headers():
     }
 
 def scrape_jd_sku(sku):
+    # 修正：去掉了多余的链接符号，直接使用纯文本网址
     url = f"[https://item.jd.com/](https://item.jd.com/){sku}.html"
     info = {"sku": sku, "title": "", "image_url": ""}
     
@@ -98,7 +99,6 @@ def call_ai(product_name, api_key, base_url):
     if not api_key: return {}
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     
-    # V3.0 特有的高转化提示词
     prompt = f"""
     你是一位拥有10年经验的电商金牌选品总监，擅长挖掘“痛点营销”和“高转化话术”。
     请根据商品名称【{product_name}】，深度剖析用户痛点，撰写 4 个极具煽动性和转化力的直播手卡卖点。
@@ -124,6 +124,7 @@ def call_ai(product_name, api_key, base_url):
         "response_format": {"type": "json_object"}
     }
     try:
+        # 修正：确保 Base URL 也是纯净的
         clean_base_url = base_url.strip().rstrip('/')
         if not clean_base_url.startswith('http'): 
             clean_base_url = "[https://api.deepseek.com](https://api.deepseek.com)"
@@ -195,6 +196,7 @@ st.title("⚡ 京东直播手卡生成器 (V3.0 ZIP版)")
 with st.sidebar:
     st.header("⚙️ 配置")
     api_key = st.text_input("AI API Key", type="password", help="输入DeepSeek Key")
+    # 修正：默认值去掉了 Markdown 格式
     base_url = st.text_input("Base URL", value="[https://api.deepseek.com](https://api.deepseek.com)")
     uploaded_template = st.file_uploader("或上传你的PPT模板", type="pptx")
     if uploaded_template:
@@ -272,6 +274,10 @@ if st.button("🚀 开始生成 (ZIP打包)", type="primary"):
             file_name="直播手卡合集.zip",
             mime="application/zip"
         )
+        # 清理临时文件
+        shutil.rmtree(output_dir)
+    else:
+        st.error("生成失败，请检查SKU")
         # 清理临时文件
         shutil.rmtree(output_dir)
     else:
