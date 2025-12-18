@@ -35,7 +35,7 @@ def get_headers():
     }
 
 def scrape_jd_sku(sku):
-    """抓取京东商品标题和主图 (多源策略，防止标题被截断)"""
+    """抓取京东商品标题和主图 (多源策略 + 增强图片匹配)"""
     url = f"https://item.jd.com/{sku}.html"
     info = {"sku": sku, "title": "", "image_url": ""}
     
@@ -44,77 +44,68 @@ def scrape_jd_sku(sku):
         r.encoding = r.apparent_encoding
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # --- 1. 抓标题 (多源择优策略) ---
+        # --- 1. 抓标题 (多源择优) ---
         candidates = []
         
-        # (A) 页面显示的标题 (可能含省略号)
+        # (A) 页面显示标题
         title_tag = soup.select_one("div.sku-name")
-        if title_tag: 
-            candidates.append(title_tag.get_text(strip=True))
+        if title_tag: candidates.append(title_tag.get_text(strip=True))
 
-        # (B) 主图 Alt 属性 (通常完整且无干扰)
+        # (B) 主图 Alt
         spec_img = soup.select_one("#spec-img")
-        if spec_img and spec_img.get('alt'):
-            candidates.append(spec_img.get('alt').strip())
+        if spec_img and spec_img.get('alt'): candidates.append(spec_img.get('alt').strip())
             
-        # (C) 网页 Title (SEO标题，通常最完整)
+        # (C) Title 标签
         if soup.title:
-            t = soup.title.get_text().strip()
-            # 移除京东SEO后缀，如 " - 京东" 或 "【行情 ...】"
-            t = t.split('-')[0].strip() 
-            t = t.split('【')[0].strip() 
+            t = soup.title.get_text().strip().split('-')[0].strip().split('【')[0].strip()
             candidates.append(t)
             
-        # (D) Meta 描述
+        # (D) Meta Keywords
         meta_kw = soup.find("meta", attrs={"name": "keywords"})
         if meta_kw and meta_kw.get("content"):
-            # keywords 通常是逗号分隔，第一个通常是全名
             candidates.append(meta_kw.get("content").split(',')[0].strip())
 
-        # 筛选与择优
-        final_title = ""
+        # 筛选标题
         valid_candidates = []
-        
         for c in candidates:
-            # 基础清理
             c = c.replace("京东", "").replace("自营", "").replace("\n", " ").strip()
-            if not c: continue
-            valid_candidates.append(c)
+            if c: valid_candidates.append(c)
             
         if valid_candidates:
-            # 排序规则：优先选【没有省略号】的，其次选【长度最长】的
-            # (not has_ellipsis) -> True(1) > False(0)
+            # 优先选无省略号且最长的
             valid_candidates.sort(key=lambda x: (not ("..." in x or "…" in x), len(x)), reverse=True)
-            final_title = valid_candidates[0]
-            
-        if final_title:
-            info["title"] = final_title
+            info["title"] = valid_candidates[0]
         else:
-            info["title"] = f"商品_{sku}" # 兜底，防止AI乱编
+            info["title"] = f"商品_{sku}"
 
-        # --- 2. 抓主图 ---
+        # --- 2. 抓主图 (增强版) ---
         candidates_img = []
-        img_tag = soup.select_one("#spec-img")
-        if img_tag:
-            candidates_img.append(img_tag.get('data-origin'))
-            candidates_img.append(img_tag.get('src'))
         
-        # 正则补充匹配
-        patterns = re.findall(r'//img\d{1,2}\.360buyimg\.com/n[01]/jfs/[^"]+\.jpg', r.text)
+        # (A) 直接获取 spec-img
+        if spec_img:
+            candidates_img.append(spec_img.get('data-origin'))
+            candidates_img.append(spec_img.get('src'))
+        
+        # (B) 正则匹配 (放宽后缀限制，支持 jpg, png, webp)
+        # 匹配 //img10.360buyimg.com/.../jfs/... 这种格式
+        patterns = re.findall(r'//img\d{1,2}\.360buyimg\.com/n[01]/jfs/[^"]+\.(?:jpg|png|webp)', r.text)
         candidates_img.extend(patterns)
 
         for img in candidates_img:
-            if img and "jfs" in img and ".jpg" in img:
+            if img and "jfs" in img:
                 if not img.startswith("http"):
                     img = "https:" + img if img.startswith("//") else "https://" + img
-                # 替换为高清大图
-                img = img.replace("/n1/", "/n0/").replace("/n5/", "/n0/")
+                
+                # 尝试获取最高清的大图 (n0 为最大，n1/n5 较小)
+                # 有些图片的路径可能是 /n1/s450x450_jfs/... 需要小心替换
+                if "/n1/" in img: img = img.replace("/n1/", "/n0/")
+                if "/n5/" in img: img = img.replace("/n5/", "/n0/")
+                
                 info["image_url"] = img
                 break
                 
         return info
     except Exception as e:
-        # 不直接报错，返回基础信息，避免打断循环
         print(f"SKU {sku} 抓取异常: {e}")
         info["title"] = f"商品_{sku}" 
         return info
@@ -130,11 +121,10 @@ def download_image_to_memory(url):
         return None
 
 def call_ai_generate_points(product_name, api_key, base_url):
-    """调用 AI 生成卖点 (User/System 分离版 + 60-80字强制约束)"""
+    """调用 AI 生成卖点"""
     if not api_key:
         return {"selling_point_1": "请填写API Key", "selling_point_2": "以生成智能卖点"}
 
-    # --- 安全检查 ---
     if product_name.startswith("商品_") and product_name[3:].isdigit():
         return {
             "selling_point_1": "标题抓取失败",
@@ -145,7 +135,6 @@ def call_ai_generate_points(product_name, api_key, base_url):
 
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     
-    # --- System Prompt: 设定人设和死命令 ---
     system_prompt = """
     你是一名带货过亿的金牌直播运营。你的唯一任务是为商品撰写极具煽动性的【直播手卡文案】。
     
@@ -159,7 +148,6 @@ def call_ai_generate_points(product_name, api_key, base_url):
     必须返回标准 JSON 对象，Key 必须严格为 selling_point_1, selling_point_2, selling_point_3, selling_point_4。
     """
 
-    # --- User Prompt: 仅包含商品名称 ---
     user_prompt = f"""
     需生成的商品名称：【{product_name}】
     
@@ -172,9 +160,9 @@ def call_ai_generate_points(product_name, api_key, base_url):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.85, # 提高随机性
+        "temperature": 0.85, 
         "response_format": {"type": "json_object"},
-        "seed": random.randint(1, 10000) # 防止缓存
+        "seed": random.randint(1, 10000) 
     }
 
     try:
@@ -190,84 +178,79 @@ def call_ai_generate_points(product_name, api_key, base_url):
         return {}
 
 def duplicate_slide(prs, source_slide_index=0):
-    """
-    克隆幻灯片的辅助函数
-    因为 python-pptx 没有直接复制 slide 的功能，需要通过 XML 操作实现
-    """
+    """克隆幻灯片"""
     source = prs.slides[source_slide_index]
     layout = source.slide_layout
     dest = prs.slides.add_slide(layout)
-    
-    # 清空新幻灯片上的默认占位符（避免重叠）
     for shp in list(dest.shapes):
         dest.shapes._spTree.remove(shp._element)
-    
-    # 复制源幻灯片的所有形状
     for shp in source.shapes:
         new_el = copy.deepcopy(shp.element)
         dest.shapes._spTree.append(new_el)
-    
     return dest
 
 def process_ppt(template_file_obj, data_list):
-    """生成单个 PPT 文件，包含所有手卡"""
+    """生成 PPT，包含所有手卡，并检查图片替换情况"""
     template_file_obj.seek(0)
     prs = Presentation(template_file_obj)
     
-    # 1. 确保有足够的幻灯片
-    # 如果有多条数据，就基于第1页（索引0）进行克隆
+    # 1. 扩充幻灯片
     if len(data_list) > 1:
         for _ in range(len(data_list) - 1):
             duplicate_slide(prs, 0)
             
-    # 2. 遍历每一页幻灯片填充数据
+    # 2. 填充数据
+    success_count = 0
+    warning_msgs = []
+    
     for idx, data in enumerate(data_list):
-        if idx >= len(prs.slides): 
-            break
-            
+        if idx >= len(prs.slides): break
         slide = prs.slides[idx]
         
-        # 文本替换函数
+        # 文本替换
         def replace_text(name, text):
             for shape in slide.shapes:
                 if shape.name == name and shape.has_text_frame:
                     shape.text_frame.text = str(text)
                     return
-                if shape.shape_type == 6: # Group
+                if shape.shape_type == 6: 
                     for sub in shape.shapes:
                         if sub.name == name and sub.has_text_frame:
                             sub.text_frame.text = str(text)
                             return
-
-        # 执行替换
+        
         replace_text("product_name", data['title'])
         replace_text("product_sku", data['sku'])
         replace_text("price_live", data['price'])
-        
         points = data.get('points', {})
-        replace_text("selling_point_1", points.get('selling_point_1', ''))
-        replace_text("selling_point_2", points.get('selling_point_2', ''))
-        replace_text("selling_point_3", points.get('selling_point_3', ''))
-        replace_text("selling_point_4", points.get('selling_point_4', ''))
+        for i in range(1, 5):
+            replace_text(f"selling_point_{i}", points.get(f'selling_point_{i}', ''))
 
-        # 图片替换
+        # 图片替换 (关键部分)
+        img_replaced = False
         if data['image_bytes']:
-            found_img = False
             for shape in slide.shapes:
+                # 检查名字是否匹配 "product_image"
                 if shape.name == "product_image":
                     left, top, width, height = shape.left, shape.top, shape.width, shape.height
-                    # 移除旧图
                     sp = shape._element
                     sp.getparent().remove(sp)
-                    # 添加新图
                     slide.shapes.add_picture(data['image_bytes'], left, top, width, height)
-                    found_img = True
+                    img_replaced = True
                     break
+            
+            if not img_replaced:
+                warning_msgs.append(f"⚠️ SKU {data['sku']}: 抓到了图片，但在模板中没找到名为 'product_image' 的占位符，无法插入。")
+        else:
+             # 没抓到图片
+             pass 
+
+        success_count += 1
     
-    # 保存结果到内存
+    # 保存
     ppt_buffer = io.BytesIO()
     prs.save(ppt_buffer)
-    return ppt_buffer
+    return ppt_buffer, warning_msgs
 
 # --- UI 布局 ---
 
@@ -283,20 +266,15 @@ with st.sidebar:
     st.divider()
     st.header("📂 2. 模板设置")
     
-    # --- 模板加载逻辑 ---
     uploaded_template = st.file_uploader("上传 .pptx 模板文件 (可选)", type=["pptx"])
-    
-    # 默认模板文件名
     DEFAULT_TEMPLATE_NAME = "template.pptx"
-    
     final_template_file = None
     
     if uploaded_template:
         st.success(f"✅ 使用上传的模板: {uploaded_template.name}")
         final_template_file = uploaded_template
     elif os.path.exists(DEFAULT_TEMPLATE_NAME):
-        st.info(f"ℹ️ 未上传模板，将使用系统默认模板 ({DEFAULT_TEMPLATE_NAME})")
-        # 将本地文件读入内存，模拟 uploaded_file 的行为
+        st.info(f"ℹ️ 使用默认模板 ({DEFAULT_TEMPLATE_NAME})")
         with open(DEFAULT_TEMPLATE_NAME, "rb") as f:
             final_template_file = io.BytesIO(f.read())
     else:
@@ -309,7 +287,6 @@ st.header("📝 3. 商品与价格")
 col1, col2 = st.columns([3, 1])
 
 with col1:
-    # --- 批量输入逻辑 ---
     st.markdown("**输入 SKU 和 价格** (格式：`SKU, 价格`，一行一个)")
     sku_input = st.text_area(
         "SKU列表", 
@@ -325,29 +302,19 @@ with col2:
 
 if st.button("🚀 开始生成", type="primary", use_container_width=True):
     if not final_template_file:
-        st.error("❌ 无法开始：没有可用的 PPT 模板（请上传或联系管理员添加默认模板）。")
+        st.error("❌ 无法开始：没有可用的 PPT 模板。")
     elif not sku_input.strip():
         st.error("❌ 请输入至少一个 SKU！")
     else:
-        # 1. 解析 SKU 和 价格
         lines = sku_input.strip().split('\n')
         tasks = []
-        
         for line in lines:
-            line = line.strip()
+            line = line.strip().replace('，', ',')
             if not line: continue
-            
-            # 兼容中文逗号
-            line = line.replace('，', ',')
-            
             parts = line.split(',')
             current_sku = parts[0].strip()
-            
-            # 如果有逗号分隔，取第二个作为价格；否则使用默认价格
             current_price = parts[1].strip() if len(parts) > 1 else default_price
-            
-            if current_sku:
-                tasks.append({"sku": current_sku, "price": current_price})
+            if current_sku: tasks.append({"sku": current_sku, "price": current_price})
 
         if not tasks:
             st.error("❌ 未识别到有效 SKU。")
@@ -357,46 +324,53 @@ if st.button("🚀 开始生成", type="primary", use_container_width=True):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # 2. 循环处理
+        # --- 创建一个图片预览区域 ---
+        st.subheader("🖼️ 抓取结果预览")
+        img_cols = st.columns(4) # 一行显示4张图
+        
         for idx, task in enumerate(tasks):
             sku = task['sku']
-            price = task['price']
-            
             status_text.text(f"正在处理 ({idx+1}/{len(tasks)}): SKU {sku} ...")
-            
-            # --- 增加随机延时，防止反爬 ---
-            if idx > 0:
-                sleep_time = random.uniform(1.5, 4.0)
-                time.sleep(sleep_time)
+            if idx > 0: time.sleep(random.uniform(1.5, 3.0))
 
             # 抓取
             info = scrape_jd_sku(sku)
-            if not info:
-                continue
-                
-            info['price'] = price
+            if not info: continue
+            info['price'] = task['price']
             
-            # AI 生成
+            # AI
             if api_key:
                 info['points'] = call_ai_generate_points(info['title'], api_key, base_url)
             else:
                 info['points'] = {}
             
-            # 下载图片
+            # 下载
             info['image_bytes'] = download_image_to_memory(info['image_url'])
             
+            # --- 实时显示抓到的图 ---
+            with img_cols[idx % 4]:
+                if info['image_bytes']:
+                    st.image(info['image_bytes'], caption=f"{sku}\n(抓取成功)", width=150)
+                else:
+                    st.warning(f"{sku}\n无图片")
+
             processed_data.append(info)
             progress_bar.progress((idx + 1) / len(tasks))
             
         status_text.text("正在生成 PPT 文件...")
         
-        # 3. 生成 PPT 文件 (单文件)
         if processed_data:
             try:
-                ppt_io = process_ppt(final_template_file, processed_data)
+                # 获取 PPT 和 警告信息
+                ppt_io, warnings = process_ppt(final_template_file, processed_data)
+                
+                # 如果有图片抓到了但没放进去，显示警告
+                if warnings:
+                    for w in warnings:
+                        st.warning(w)
+                    st.error("💡 提示：请检查 PPT 模板中是否有一个名为 product_image 的占位图片。")
                 
                 st.success(f"🎉 成功生成 {len(processed_data)} 张手卡！")
-                
                 st.download_button(
                     label="📥 下载 PPT (单文件 .pptx)",
                     data=ppt_io.getvalue(),
@@ -405,6 +379,6 @@ if st.button("🚀 开始生成", type="primary", use_container_width=True):
                     type="primary"
                 )
             except Exception as e:
-                st.error(f"生成 PPT 时发生错误 (可能是模板格式问题): {e}")
+                st.error(f"生成 PPT 时发生错误: {e}")
         else:
-            st.error("未能生成有效数据，请检查 SKU 是否正确。")
+            st.error("未能生成有效数据。")
